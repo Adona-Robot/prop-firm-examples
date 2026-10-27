@@ -154,16 +154,39 @@ function showExecution(e) {
 // billed as a continuous feed: subscribe to what is displayed, nothing more.
 let watching = 0; // the latest request: an older one that finishes late gives up
 let backoff = 1000;
+let liveFor = 0; // the request whose live price is on screen: a last known one never covers it
 
-function stale() {
-  $("bid").textContent = $("ask").textContent = "-";
+// Never an empty screen: until the stream's first tick (a page just opened, a symbol just
+// chosen, the stream reconnecting), the last known price, from the executable price your
+// server reads (a market BUY fills at the ask, a SELL at the bid), with the time it was
+// set and marked as such. The next tick replaces it. Two reads of a quota of thirty a
+// minute per trader: one symbol change, or one reconnection, costs two.
+async function lastKnown(symbol, generation) {
+  try {
+    const [sell, buy] = await Promise.all(["SELL", "BUY"].map((side) =>
+      call("GET", `/api/price?symbol=${encodeURIComponent(symbol)}&side=${side}&intent=open`)));
+    if (generation !== watching || liveFor === generation) return;
+    $("bid").textContent = sell.price;
+    $("ask").textContent = buy.price;
+    $("quote-at").textContent = `last known, ${new Date(buy.as_of).toLocaleString()}`;
+  } catch {
+    // A closed market, the quota, a server restarting: what is on screen stays, and
+    // says it is not live.
+    if (generation === watching && liveFor !== generation) $("quote-at").textContent = "no live price";
+  }
+}
+
+function stale(symbol, generation) {
+  if (liveFor === generation) liveFor = 0;
   $("quote-at").textContent = "no live price";
+  void lastKnown(symbol, generation);
 }
 
 async function watch(symbol) {
   const generation = ++watching;
   if (socket) { socket.onclose = null; socket.close(1000); socket = null; }
-  stale();
+  $("bid").textContent = $("ask").textContent = "-";
+  stale(symbol, generation);
   let ticket;
   try {
     const { token } = await call("GET", "/api/data-token");
@@ -179,7 +202,7 @@ async function watch(symbol) {
   // Dropped: say so (never a frozen price that looks live), then come back. A close
   // with a reason (1008) is an answer, such as an access cut: no loop on it.
   socket.onclose = (event) => {
-    stale();
+    stale(symbol, generation);
     if (event.code !== 1008 && generation === watching) setTimeout(() => generation === watching && watch(symbol), backoff = Math.min(backoff * 2, 30_000));
   };
   socket.onopen = () => socket.send(JSON.stringify({ type: "subscribe", request_id: "q", payload: { channels: [`quote:${symbol}`] } }));
@@ -187,6 +210,7 @@ async function watch(symbol) {
     const { type, payload } = JSON.parse(event.data);
     if ((type === "quote.snapshot" || type === "quote.update") && payload.symbol === symbol) {
       backoff = 1000;
+      liveFor = generation;
       $("bid").textContent = payload.bid;
       $("ask").textContent = payload.ask;
       $("quote-at").textContent = new Date(payload.as_of).toLocaleTimeString();

@@ -86,6 +86,10 @@ reads a second. Poll less often if your page can wait.
 
 - **The live prices are for display** (charts, the bid and ask on screen). They never promise
   the price of an execution.
+- **Never an empty screen.** Until the stream's first tick (the page just opened, a symbol
+  just chosen, the stream reconnecting, our side restarting), the page shows the last known
+  price from the executable price, with the time it was set, marked "last known". The next
+  tick replaces it. On a closed market, that time says how old it is.
 - **The executable price** (`GET /v1/prop/traders/{id}/executable-price`) is what a market
   order would fill at now. It is indicative too: the order fills when it is processed. On a
   close, `side` is the closing order's (SELL to close a BUY). It has a quota per minute.
