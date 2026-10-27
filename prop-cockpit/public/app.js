@@ -158,8 +158,8 @@ let liveFor = 0; // the request whose live price is on screen: a last known one 
 
 // Never an empty screen: until the stream's first tick (a page just opened, a symbol just
 // chosen, the stream reconnecting), the last known price, from the executable price your
-// server reads (a market BUY fills at the ask, a SELL at the bid), with the time it was
-// set and marked as such. The next tick replaces it. Two reads of a quota of thirty a
+// server reads (a market BUY fills at the ask, a SELL at the bid), with the time the API
+// gives for it (`as_of`), marked as such. A closed market refuses it: "no live price". The next tick replaces it. Two reads of a quota of thirty a
 // minute per trader: one symbol change, or one reconnection, costs two.
 async function lastKnown(symbol, generation) {
   try {
@@ -168,7 +168,7 @@ async function lastKnown(symbol, generation) {
     if (generation !== watching || liveFor === generation) return;
     $("bid").textContent = sell.price;
     $("ask").textContent = buy.price;
-    $("quote-at").textContent = `last known, ${new Date(buy.as_of).toLocaleString()}`;
+    $("quote-at").textContent = `last known (as of ${new Date(buy.as_of).toLocaleString()})`;
   } catch {
     // A closed market, the quota, a server restarting: what is on screen stays, and
     // says it is not live.
