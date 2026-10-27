@@ -44,12 +44,23 @@ npm test                 # against a fake Adona Robot: no key, no network
   anywhere but this machine. Replace it with your own sign-in. Keep the part that matters: your
   user is matched to your trader by your `external_ref`.
 - **The writes carry a CSRF token.** The page reads it from `/api/session` and sends it in a
-  header. The session cookie is `SameSite=Strict`.
+  header. The session cookie is `SameSite=Strict`, and no other site may frame the page
+  (`frame-ancestors 'none'`).
+- **The demo refuses anything that is not this machine**: another address, another `Host`,
+  or a forwarding header. A proxy or a tunnel in front of it does not put it online.
+- **Your sessions are yours to finish**: the demo's live in memory for eight hours, with a
+  sign-out (`POST /api/logout`). Yours need `Secure` cookies once served over HTTPS.
+- **A write must come from the page**: JSON only, and from this origin when the browser names
+  one. A form on another site can do neither, the sign-in included.
 
 ## An order is placed once
 
-A network that hesitates must never open a second position. Every order goes out with an
-`Idempotency-Key` header (required on an opening):
+A network that hesitates must never open a second position, and two networks hesitate here:
+the trader's, between their browser and your server, and yours, between your server and
+Adona Robot. Every order goes out with an `Idempotency-Key` header (required on an opening),
+**made by the page** when the trader first sends the order and kept until a final answer. Your
+server checks it is a UUID and prefixes it with the session's trader, so nobody aims at
+another trader's key. Then, on either link:
 
 - a **new** key for each order you mean to place;
 - the **same** key when you send that order again: no answer (a timeout), a 5xx, or
@@ -58,8 +69,9 @@ A network that hesitates must never open a second position. Every order goes out
 - `IDEMPOTENCY_OUTCOME_UNKNOWN`: do **not** send it again. Read the trader's positions, then
   decide, with a new key if you place it again.
 
-`Adona.placeOnce` in `adona.mjs` does exactly this, and a test proves it: the answer to the
-first order is lost, the order is sent again with the same key, and one order is placed.
+`order()` in `public/app.js` and `Adona.placeOnce` in `adona.mjs` do exactly this, and two
+tests prove it: an answer lost between Adona and your server, then one lost between your server
+and the page, each followed by the order sent again with the same key: one order placed.
 
 ## Each trader sees only their own executions
 
@@ -67,7 +79,8 @@ Your server reads each connected trader's executions (`GET /v1/prop/traders/{id}
 and relays new ones to **that trader's** open pages, over Server-Sent Events, and to no one
 else's. A test signs two traders in and checks that each receives their own executions only.
 
-*Polled for now: a dedicated stream of confirmations, planned for later, will push them instead.*
+Each connected trader is one read every two seconds: thirty traders online make about fifteen
+reads a second. Poll less often if your page can wait.
 
 ## Prices: what the page shows, and what an order fills at
 
@@ -84,11 +97,17 @@ else's. A test signs two traders in and checks that each receives their own exec
 
 ## What your data plan sees
 
-- **Each signed-in trader is one connection.** Your plan is sized by the month's peak of
-  simultaneous connections: a class of 30 traders online fits in Starter.
-- **Subscribe to what is on screen, nothing more.** A symbol followed live for more than 80% of
-  its open hours in a month adds CHF 150 to that month's invoice. A page left open all day on
-  every symbol does exactly that, so this one follows the displayed symbol only.
+- **Each signed-in trader is one connection, and so is each extra tab they open.** Your plan
+  is sized by the month's peak of simultaneous connections.
+- **The data token is the trader's to see.** It lives twelve hours in their browser, and a
+  curious trader can use it for any symbol of your data account, on your bill. Hand it to
+  people you trust with that, as you would any feature of your product.
+- **Subscribe to what is on screen, nothing more.** A symbol followed live most of its open
+  hours in a month is billed as a continuous feed, on top of the plan. A page left open all day
+  on every symbol does exactly that, so this one follows the displayed symbol only.
+
+The plans and the continuous-feed rule, with their figures, are on
+[adona-robot.com](https://adona-robot.com/en).
 
 ## Refusals
 

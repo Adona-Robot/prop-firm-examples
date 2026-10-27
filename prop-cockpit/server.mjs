@@ -16,25 +16,33 @@
 // Every /api route acts for the trader of the session, never for an id the browser sends.
 
 import { createServer } from "node:http";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Adona, AdonaError } from "./adona.mjs";
-import { demoUsers, assertLocalOnly } from "./demo-login.mjs";
+import { demoUsers, assertLocalOnly, isLocalRequest } from "./demo-login.mjs";
 
 const PUBLIC = join(fileURLToPath(new URL(".", import.meta.url)), "public");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css" };
 
+// On every answer: no other site may frame the order buttons, nor reinterpret a file.
+const SAFE = { "Content-Security-Policy": "frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" };
+// The key the page sends for one order: a UUID, prefixed here by the session's trader.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class BadRequest extends Error {}
+
 function send(res, status, body, headers = {}) {
-  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...SAFE, ...headers });
   res.end(JSON.stringify(body));
 }
 
 // A refusal from Adona goes to the browser as its code (and `Retry-After`): the page says
 // what to do. Anything else is ours, and says nothing of why.
 function refuse(res, error) {
+  if (error instanceof BadRequest) return send(res, 400, { detail: "BAD_REQUEST" });
   if (error instanceof AdonaError) {
     // 401: YOUR key or token was refused. That is yours to fix, not the trader's.
     if (error.status === 401) {
@@ -49,12 +57,19 @@ function refuse(res, error) {
 }
 
 async function body(req) {
-  let raw = "";
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    raw += chunk;
-    if (raw.length > 16_384) throw new Error("body too large");
+    size += chunk.length;
+    if (size > 16_384) throw new BadRequest("body too large");
+    chunks.push(chunk);
   }
-  return raw ? JSON.parse(raw) : {};
+  const raw = Buffer.concat(chunks).toString("utf8");
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new BadRequest("not JSON");
+  }
 }
 
 function cookie(req, name) {
@@ -67,9 +82,29 @@ function same(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function createApp({ adona, users, pollMs = 2000 }) {
-  // sid -> { user, traderId, csrf }. In memory for the example; yours lives where your
-  // sessions live.
+// The key of one order comes from the PAGE, made when the trader first sends it and kept
+// until a final answer: the link between a trader's browser and your server hesitates
+// too (a phone's network, a reload), and a key made here per request would make a click
+// sent again a second order. Prefixed by the session's trader: nobody aims at another's.
+function orderKey(req, traderId) {
+  const key = req.headers["idempotency-key"];
+  if (!UUID.test(String(key ?? ""))) throw new BadRequest("Idempotency-Key: a UUID from the page");
+  return `${traderId}:${key}`;
+}
+
+// A write must come from this page: JSON (a form on another site cannot send it without a
+// preflight), and, when the browser says where it comes from, from this very origin.
+function sameOrigin(req) {
+  const type = String(req.headers["content-type"] ?? "");
+  const origin = req.headers.origin;
+  return type.startsWith("application/json") && (!origin || origin === `http://${req.headers.host}`);
+}
+
+const SESSION_MS = 8 * 3600 * 1000;
+
+export function createApp({ adona, users, pollMs = 2000, localOnly = true }) {
+  // sid -> { user, traderId, csrf, until }. In memory, eight hours, for the example; yours
+  // lives where your sessions live, with `Secure` cookies once served over HTTPS.
   const sessions = new Map();
   // traderId -> { clients: Set<res>, seen: Set<event_id>, timer }. One poll per CONNECTED
   // trader, relayed to that trader's own pages and nobody else's.
@@ -77,7 +112,13 @@ export function createApp({ adona, users, pollMs = 2000 }) {
 
   function sessionOf(req) {
     const sid = cookie(req, "sid");
-    return sid ? sessions.get(sid) ?? null : null;
+    const session = sid ? sessions.get(sid) : null;
+    if (!session) return null;
+    if (Date.now() > session.until) {
+      sessions.delete(sid);
+      return null;
+    }
+    return session;
   }
 
   // The writes need the CSRF token the page read from /api/session, in a header a form on
@@ -92,10 +133,18 @@ export function createApp({ adona, users, pollMs = 2000 }) {
     const feed = feeds.get(traderId);
     if (!feed) return;
     try {
-      const { executions } = await adona.executions(traderId, { limit: 50 });
-      const fresh = executions.filter((e) => !feed.seen.has(e.event_id)).reverse(); // oldest first
-      for (const execution of fresh) {
-        feed.seen.add(execution.event_id);
+      // Newest first: read pages back to the last one already relayed (at most a few).
+      const fresh = [];
+      let cursor;
+      for (let page = 0; page < 5; page += 1) {
+        const { executions, next_cursor } = await adona.executions(traderId, { limit: 50, cursor });
+        const unseen = executions.filter((e) => !feed.seen.has(e.event_id));
+        fresh.push(...unseen);
+        if (!feed.primed || unseen.length < executions.length || !next_cursor) break;
+        cursor = next_cursor;
+      }
+      for (const execution of fresh.reverse()) { // oldest first
+        remember(feed, execution.event_id);
         if (!feed.primed) continue; // the first read is history, not news
         for (const client of feed.clients) client.write(`event: execution\ndata: ${JSON.stringify(execution)}\n\n`);
       }
@@ -105,19 +154,30 @@ export function createApp({ adona, users, pollMs = 2000 }) {
     }
   }
 
+  // What a feed has relayed, the last 500 ids: enough to recognise a page, and bounded.
+  function remember(feed, id) {
+    feed.seen.add(id);
+    if (feed.seen.size > 500) feed.seen.delete(feed.seen.values().next().value);
+  }
+
   function follow(traderId, res) {
     let feed = feeds.get(traderId);
     if (!feed) {
       feed = { clients: new Set(), seen: new Set(), primed: false, timer: null };
       feeds.set(traderId, feed);
-      feed.timer = setInterval(() => poll(traderId), pollMs);
-      poll(traderId);
+      // One read at a time: the next is scheduled once this one is done, so a slow answer
+      // never piles reads up.
+      const tick = async () => {
+        await poll(traderId);
+        if (feeds.get(traderId) === feed) feed.timer = setTimeout(tick, pollMs);
+      };
+      tick();
     }
     feed.clients.add(res);
     res.on("close", () => {
       feed.clients.delete(res);
       if (feed.clients.size === 0) {
-        clearInterval(feed.timer);
+        clearTimeout(feed.timer);
         feeds.delete(traderId);
       }
     });
@@ -126,14 +186,21 @@ export function createApp({ adona, users, pollMs = 2000 }) {
   async function api(req, res, url) {
     const path = url.pathname;
 
+    if (req.method === "POST" && !sameOrigin(req)) return send(res, 403, { detail: "CROSS_SITE" });
+
     if (req.method === "POST" && path === "/api/login") {
       const { username } = await body(req);
       const externalRef = users.get(String(username ?? ""));
       if (!externalRef) return send(res, 401, { detail: "UNKNOWN_USER" });
       const trader = await adona.traderByRef(externalRef);
       if (!trader) return send(res, 404, { detail: "NOT_A_TRADER_OF_YOURS" });
+      const previous = cookie(req, "sid");
+      if (previous) sessions.delete(previous); // a new sign-in ends the old session
       const sid = randomBytes(32).toString("base64url");
-      sessions.set(sid, { user: username, traderId: trader.trader_id, csrf: randomBytes(32).toString("base64url") });
+      sessions.set(sid, {
+        user: username, traderId: trader.trader_id, csrf: randomBytes(32).toString("base64url"),
+        until: Date.now() + SESSION_MS,
+      });
       return send(res, 200, { ok: true }, {
         "Set-Cookie": `sid=${sid}; HttpOnly; SameSite=Strict; Path=/`,
       });
@@ -165,21 +232,26 @@ export function createApp({ adona, users, pollMs = 2000 }) {
 
     if (req.method === "POST") {
       if (!csrfOk(req, session)) return send(res, 403, { detail: "CSRF" });
+      if (path === "/api/logout") {
+        sessions.delete(cookie(req, "sid"));
+        return send(res, 200, { ok: true }, { "Set-Cookie": "sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0" });
+      }
       if (path === "/api/orders") {
         const o = await body(req);
-        // Passed on as asked: Adona judges the order (SL and TP, the rules, the 2 %).
+        // Passed on as asked: Adona judges the order (stop loss, take profit, the account's rules).
         const order = {
           symbol: o.symbol, side: o.side, quantity: o.quantity, order_kind: o.order_kind ?? "MARKET",
           stop_loss_price: o.stop_loss_price, take_profit_price: o.take_profit_price,
           ...(o.entry_price ? { entry_price: o.entry_price } : {}),
         };
         // A NEW key for this order. `placeOnce` reuses it on every retry of THIS order.
-        return send(res, 200, await adona.openOrder(trader, order, randomUUID()));
+        // The page's key for THIS order: the same on every resend, from the page or from here.
+        return send(res, 200, await adona.openOrder(trader, order, orderKey(req, trader)));
       }
       let match = path.match(/^\/api\/positions\/([A-Za-z0-9:._-]{1,128})\/close$/);
-      if (match) return send(res, 200, await adona.closePosition(trader, match[1], randomUUID()));
+      if (match) return send(res, 200, await adona.closePosition(trader, match[1], orderKey(req, trader)));
       match = path.match(/^\/api\/orders\/([A-Za-z0-9:._-]{1,128})\/cancel$/);
-      if (match) return send(res, 200, await adona.cancelOrder(trader, match[1], randomUUID()));
+      if (match) return send(res, 200, await adona.cancelOrder(trader, match[1], orderKey(req, trader)));
     }
     return send(res, 404, { detail: "Not Found" });
   }
@@ -189,7 +261,7 @@ export function createApp({ adona, users, pollMs = 2000 }) {
     if (!/^[a-z-]+\.(html|js|css)$/.test(file)) return send(res, 404, { detail: "Not Found" });
     try {
       const content = await readFile(join(PUBLIC, file));
-      res.writeHead(200, { "Content-Type": TYPES[extname(file)], "Cache-Control": "no-store" });
+      res.writeHead(200, { "Content-Type": TYPES[extname(file)], "Cache-Control": "no-store", ...SAFE });
       res.end(content);
     } catch {
       send(res, 404, { detail: "Not Found" });
@@ -198,6 +270,7 @@ export function createApp({ adona, users, pollMs = 2000 }) {
 
   return createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
+    if (localOnly && !isLocalRequest(req)) return send(res, 403, { detail: "DEMO_SIGN_IN_IS_LOCAL_ONLY" });
     try {
       if (url.pathname.startsWith("/api/")) await api(req, res, url);
       else await serveStatic(res, url.pathname);
