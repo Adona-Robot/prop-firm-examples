@@ -28,17 +28,31 @@ const SAY = {
 // accepted order, or a refusal of the order itself. Sent again (no answer, a reload of the
 // request, the server unsure), the order carries the same key, and Adona places it once.
 // Changed in any field, it is another order, with another key.
-const keys = new Map(); // what the order is -> its key
+// Kept in the tab's sessionStorage, so a reload of the page keeps them too.
+const STORE = "order-keys";
+const keys = new Map(Object.entries((() => {
+  try { return JSON.parse(sessionStorage.getItem(STORE)) ?? {}; } catch { return {}; }
+})()));
+
+function saveKeys() {
+  try { sessionStorage.setItem(STORE, JSON.stringify(Object.fromEntries(keys))); } catch { /* private mode: memory only */ }
+}
 
 function keyFor(what) {
-  if (!keys.has(what)) keys.set(what, crypto.randomUUID());
+  if (!keys.has(what)) {
+    keys.set(what, crypto.randomUUID());
+    saveKeys();
+  }
   return keys.get(what);
 }
 
 // Final: the order was taken, or refused for what it is (4xx). Not final: no answer at
 // all, or our server or Adona unsure (5xx, 502): the next send reuses the key.
 function settle(what, error) {
-  if (!error || (error.status >= 400 && error.status < 500 && error.code !== "IDEMPOTENCY_KEY_IN_PROGRESS")) keys.delete(what);
+  if (!error || (error.status >= 400 && error.status < 500 && error.code !== "IDEMPOTENCY_KEY_IN_PROGRESS")) {
+    keys.delete(what);
+    saveKeys();
+  }
 }
 
 async function order(path, body) {

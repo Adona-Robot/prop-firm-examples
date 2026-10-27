@@ -94,15 +94,16 @@ function orderKey(req, traderId) {
 
 // A write must come from this page: JSON (a form on another site cannot send it without a
 // preflight), and, when the browser says where it comes from, from this very origin.
-function sameOrigin(req) {
+// Served at a public address (HTTPS, your own sign-in), set PUBLIC_ORIGIN to it.
+function sameOrigin(req, publicOrigin) {
   const type = String(req.headers["content-type"] ?? "");
   const origin = req.headers.origin;
-  return type.startsWith("application/json") && (!origin || origin === `http://${req.headers.host}`);
+  return type.startsWith("application/json") && (!origin || origin === (publicOrigin ?? `http://${req.headers.host}`));
 }
 
 const SESSION_MS = 8 * 3600 * 1000;
 
-export function createApp({ adona, users, pollMs = 2000, localOnly = true }) {
+export function createApp({ adona, users, pollMs = 2000, localOnly = true, publicOrigin }) {
   // sid -> { user, traderId, csrf, until }. In memory, eight hours, for the example; yours
   // lives where your sessions live, with `Secure` cookies once served over HTTPS.
   const sessions = new Map();
@@ -186,7 +187,7 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true }) {
   async function api(req, res, url) {
     const path = url.pathname;
 
-    if (req.method === "POST" && !sameOrigin(req)) return send(res, 403, { detail: "CROSS_SITE" });
+    if (req.method === "POST" && !sameOrigin(req, publicOrigin)) return send(res, 403, { detail: "CROSS_SITE" });
 
     if (req.method === "POST" && path === "/api/login") {
       const { username } = await body(req);
@@ -244,7 +245,6 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true }) {
           stop_loss_price: o.stop_loss_price, take_profit_price: o.take_profit_price,
           ...(o.entry_price ? { entry_price: o.entry_price } : {}),
         };
-        // A NEW key for this order. `placeOnce` reuses it on every retry of THIS order.
         // The page's key for THIS order: the same on every resend, from the page or from here.
         return send(res, 200, await adona.openOrder(trader, order, orderKey(req, trader)));
       }
@@ -290,7 +290,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     tenantKey: process.env.ADONA_TENANT_KEY,
     dataKey: process.env.ADONA_DATA_KEY,
   });
-  createApp({ adona, users: demoUsers(process.env.DEMO_USERS) }).listen(port, host, () => {
+  createApp({ adona, users: demoUsers(process.env.DEMO_USERS), publicOrigin: process.env.PUBLIC_ORIGIN || undefined }).listen(port, host, () => {
     console.log(`prop cockpit on http://${host}:${port} (DEMO sign-in: local only)`);
   });
 }
