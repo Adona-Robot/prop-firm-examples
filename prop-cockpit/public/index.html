@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prop cockpit (reference)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <strong>Prop cockpit</strong> <span class="muted">reference example: copy it and make it yours</span>
+    <span id="who" class="right"></span>
+  </header>
+
+  <section id="signin">
+    <h2>Sign in (demo)</h2>
+    <p class="muted">The demo sign-in takes a user name only and runs on your own machine only. Replace it with yours.</p>
+    <form id="login"><input name="username" placeholder="alice" required> <button>Sign in</button></form>
+    <p id="login-error" class="error"></p>
+  </section>
+
+  <main id="cockpit" hidden>
+    <section>
+      <h2>Market</h2>
+      <label>Symbol <select id="symbol"></select></label>
+      <p class="quote"><span>Bid <b id="bid">-</b></span> <span>Ask <b id="ask">-</b></span> <span class="muted" id="quote-at"></span></p>
+      <p class="muted">Live prices are for display. The fill price is set when the order is executed, and the execution below is what counts.</p>
+    </section>
+
+    <section>
+      <h2>New order</h2>
+      <form id="order">
+        <label>Side <select name="side"><option>BUY</option><option>SELL</option></select></label>
+        <label>Lots <input name="quantity" value="0.10" required inputmode="decimal"></label>
+        <label>Type <select name="order_kind"><option>MARKET</option><option>LIMIT</option><option>STOP</option></select></label>
+        <label>Level <input name="entry_price" placeholder="LIMIT / STOP only" inputmode="decimal"></label>
+        <label>Stop loss <input name="stop_loss_price" required inputmode="decimal"></label>
+        <label>Take profit <input name="take_profit_price" required inputmode="decimal"></label>
+        <button>Place</button>
+        <button type="button" id="price">Executable price</button>
+      </form>
+      <p id="order-result"></p>
+    </section>
+
+    <section>
+      <h2>Positions</h2>
+      <table id="positions"><thead><tr><th>Symbol</th><th>Side</th><th>Lots</th><th>Entry</th><th>SL</th><th>TP</th><th>Unrealized</th><th></th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>Resting orders</h2>
+      <table id="pending"><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Level</th><th>Lots</th><th>SL</th><th>TP</th><th></th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>Executions</h2>
+      <table id="executions"><thead><tr><th>Time</th><th>Kind</th><th>Symbol</th><th>Side</th><th>Status</th><th>Lots</th><th>Price</th><th>Reason</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "adona-prop-cockpit",
+  "private": true,
+  "description": "A reference trading front for a prop firm on Adona Robot: copy it and make it yours.",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --env-file=.env server.mjs",
+    "test": "node --test"
+  }
+}
