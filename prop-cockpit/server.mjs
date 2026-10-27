@@ -87,7 +87,7 @@ export function createApp({ adona, users, pollMs = 2000 }) {
   }
 
   // Your trader's executions, polled by cursor and relayed to THEIR open pages.
-  // Replaced by the prop socket (D3) when it exists: Adona will then push them.
+  // Polled for now: a dedicated stream of confirmations, planned for later, will push them.
   async function poll(traderId) {
     const feed = feeds.get(traderId);
     if (!feed) return;

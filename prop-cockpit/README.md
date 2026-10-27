@@ -67,7 +67,7 @@ Your server reads each connected trader's executions (`GET /v1/prop/traders/{id}
 and relays new ones to **that trader's** open pages, over Server-Sent Events, and to no one
 else's. A test signs two traders in and checks that each receives their own executions only.
 
-*Polled for now: replaced by the prop socket (D3) when it exists, which will push them.*
+*Polled for now: a dedicated stream of confirmations, planned for later, will push them instead.*
 
 ## Prices: what the page shows, and what an order fills at
 
