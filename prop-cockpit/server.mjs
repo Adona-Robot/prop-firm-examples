@@ -128,7 +128,7 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true }) {
   }
 
   // Your trader's executions, polled by cursor and relayed to THEIR open pages.
-  // Polled for now: a dedicated stream of confirmations, planned for later, will push them.
+  // Polled: one read per connected trader every `pollMs`.
   async function poll(traderId) {
     const feed = feeds.get(traderId);
     if (!feed) return;
