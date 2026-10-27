@@ -158,8 +158,8 @@ let liveFor = 0; // the request whose live price is on screen: a last known one 
 
 // Never an empty screen: until the stream's first tick (a page just opened, a symbol just
 // chosen, the stream reconnecting), the last known price, from the executable price your
-// server reads (a market BUY fills at the ask, a SELL at the bid), with the time it was set
-// (`as_of`), marked as such. On a closed market it is that market's last price, said
+// server reads (a market BUY fills at the ask, a SELL at the bid), with the time the API
+// gives for it (`as_of`: the price is at least that old), marked as such. On a closed market it is that market's last price, said
 // closed (`market_open: false`): an order now would be refused. The next tick replaces it. Two reads of a quota of thirty a
 // minute per trader: one symbol change, or one reconnection, costs two.
 async function lastKnown(symbol, generation) {
