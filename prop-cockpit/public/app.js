@@ -155,6 +155,7 @@ function showExecution(e) {
 let watching = 0; // the latest request: an older one that finishes late gives up
 let backoff = 1000;
 let liveFor = 0; // the request whose live price is on screen: a last known one never covers it
+let shown = null; // the symbol whose price is on screen
 
 // Never an empty screen: until the stream's first tick (a page just opened, a symbol just
 // chosen, the stream reconnecting), the last known price, from the executable price your
@@ -186,7 +187,9 @@ function stale(symbol, generation) {
 async function watch(symbol) {
   const generation = ++watching;
   if (socket) { socket.onclose = null; socket.close(1000); socket = null; }
-  $("bid").textContent = $("ask").textContent = "-";
+  // A new symbol clears the old one's price. A reconnection keeps it on screen, said not
+  // live, while our side comes back: never an empty screen.
+  if (symbol !== shown) { $("bid").textContent = $("ask").textContent = "-"; shown = symbol; }
   stale(symbol, generation);
   let ticket;
   try {
