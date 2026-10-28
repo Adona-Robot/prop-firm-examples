@@ -23,6 +23,8 @@ npm test                 # against a fake Adona Robot: no key, no network
    live prices. Both stay in `.env`, on your server. Neither ever reaches a browser.
 2. **Your traders**, invited through `POST /v1/prop/traders` with your own name for each
    (`external_ref`). `DEMO_USERS` maps a demo user name to that name.
+   Each trades on an account you open for them on one of your products
+   (`POST /v1/prop/traders/{id}/accounts`); until then the page answers `NO_TRADING_ACCOUNT`.
 3. **Your page's origin** (`http://127.0.0.1:8080` here) declared among the browser origins
    of your data account: the page opens the live prices itself.
 
@@ -133,6 +135,8 @@ meets most:
 | `IDEMPOTENCY_OUTCOME_UNKNOWN` | 409 | Read the positions before anything else. |
 | `TRADER_ORDER_RATE_LIMITED`, `TENANT_ORDER_RATE_LIMITED`, `EXECUTABLE_PRICE_RATE_LIMITED` | 429 | Wait `Retry-After`. |
 | `TRADING_API_BUSY`, `TRADING_QUOTA_UNAVAILABLE` | 503 | Wait `Retry-After`. |
+| `EXPOSURE_UNAVAILABLE` | 503 | The account cannot be read right now: retry in a few seconds. |
+| `NO_TRADING_ACCOUNT` | 409 | Open an account for this trader first. |
 | `TRADER_NOT_FOUND` | 404 | Not a trader of yours. |
 
 Closing, reducing and cancelling are never held back by the opening quotas. The full list,

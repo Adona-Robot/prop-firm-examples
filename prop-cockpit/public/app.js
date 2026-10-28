@@ -22,6 +22,8 @@ const SAY = {
   IDEMPOTENCY_KEY_IN_PROGRESS: "Still being placed. Wait a moment, then check your positions.",
   UPSTREAM_UNAVAILABLE: "We could not confirm this. Check your positions and orders before sending it again.",
   ACCOUNT_TEMPORARILY_UNAVAILABLE: "Account temporarily unavailable.",
+  NO_TRADING_ACCOUNT: "You have no trading account yet.",
+  EXPOSURE_UNAVAILABLE: "Your account cannot be read right now. Retry in a few seconds.",
 };
 
 // One key per order, made when it is first sent and kept until a FINAL answer: an
