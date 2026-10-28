@@ -76,6 +76,9 @@ function signedOut() {
 
 async function call(method, path, body, idempotencyKey) {
   let response;
+  // Every write is JSON, a close or a cancel with an empty body too: your server refuses
+  // any other type, which is what keeps a form on another site out.
+  if (method !== "GET") body ??= {};
   try {
     response = await fetch(path, {
       method,
