@@ -5,8 +5,9 @@
 //   ADONA_API=... ADONA_TENANT_KEY=... ADONA_DATA_KEY=... \
 //   CHECK_TRADERS=<external_ref of trader A>,<external_ref of trader B> node check/live.mjs
 //
-// Both traders need an open account. It opens and closes one small EURUSD position for
-// trader A: run it on a demo account, never on a funded one.
+// Both traders need an open account; with CHECK_PRODUCT=<your product's slug>, it opens one
+// for each first. It opens and closes one small EURUSD position for trader A: run it on a
+// demo account, never on a funded one.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -61,12 +62,12 @@ function stream(who, symbol, events, signal) {
   }).catch(() => {});
 }
 
-async function until(what, test) {
-  const deadline = Date.now() + WAIT_MS;
+async function until(what, test, everyMs = 200) {
+  const deadline = Date.now() + Math.max(WAIT_MS, everyMs > 200 ? 180_000 : 0);
   while (Date.now() < deadline) {
-    const found = test();
+    const found = await test();
     if (found) return found;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, everyMs));
   }
   throw new Error(`${what}: nothing within ${WAIT_MS} ms`);
 }
@@ -79,8 +80,30 @@ function post(who, path, body, key = randomUUID()) {
   });
 }
 
+// An account for each trader on CHECK_PRODUCT, if asked. Until the venue session of your
+// account is up, an opening answers 503 ACCOUNT_OPENING_UNAVAILABLE: waited out.
+async function openAccounts(product) {
+  for (const ref of [refA, refB]) {
+    const trader = await adona.traderByRef(ref);
+    assert.ok(trader, `no trader of yours named ${ref}`);
+    await until(`an account for ${ref}`, async () => {
+      try {
+        await adona.propCall("POST", `/v1/prop/traders/${trader.trader_id}/accounts`, { body: { product } });
+        return true;
+      } catch (error) {
+        if (error.status === 503 && error.code === "ACCOUNT_OPENING_UNAVAILABLE") return false;
+        throw error;
+      }
+    }, 2000);
+  }
+}
+
 const stop = new AbortController();
 try {
+  if (process.env.CHECK_PRODUCT) {
+    await openAccounts(process.env.CHECK_PRODUCT);
+    ok(`an account for each trader on ${process.env.CHECK_PRODUCT}`);
+  }
   const a = await signIn("a");
   const b = await signIn("b");
   assert.equal("data_api" in a.session, false, "no data API address for the page");
