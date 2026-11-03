@@ -360,8 +360,10 @@ test("one price socket serves every page, each its own symbol, and the browser g
 test("a page cannot make the server follow a symbol that is not its trader's", async (t) => {
   const { base } = await world(t);
   const alice = await signIn(base, "alice");
-  const response = await fetch(`${base}/api/stream?symbol=GBPUSD`, { headers: { cookie: alice.cookie } });
-  assert.deepEqual([response.status, await response.json()], [400, { detail: "BAD_REQUEST" }]);
+  // Bounded: a server that followed it would answer with a stream that never ends.
+  const response = await fetch(`${base}/api/stream?symbol=GBPUSD`, { headers: { cookie: alice.cookie }, signal: AbortSignal.timeout(2000) });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { detail: "BAD_REQUEST" });
 });
 
 test("without a data key, no price socket: the page shows the last known prices", async (t) => {
