@@ -1,17 +1,17 @@
-// The page. It never holds a key nor the prop token: it talks to YOUR server (/api/...),
-// and reads live prices with a data token your server gives it for this trader.
+// The page. It never holds a key nor a token: it talks to YOUR server (/api/...), which
+// relays this trader's confirmations and the live price on screen (/api/stream).
 
 const $ = (id) => document.getElementById(id);
 let csrf = null;
-let dataApi = null; // the data API, for the live prices only (from your server)
-let socket = null;
+let livePrices = false; // your server relays live prices (it holds a data key)
+let feed = null; // the EventSource of /api/stream
 
 // What a refusal code means for the person in front of the page. The full list, and what
 // to do about each, is in the API reference.
 const SAY = {
   STOP_LOSS_REQUIRED: "Set a stop loss.",
   TAKE_PROFIT_REQUIRED: "Set a take profit.",
-  SYMBOL_NOT_TRADABLE_BY_API: "This symbol is traded in the Adona cockpit only.",
+  SYMBOL_NOT_TRADABLE_BY_API: "This symbol cannot be traded here.",
   SYMBOL_NOT_ALLOWED: "Not a symbol of your account.",
   MARKET_CLOSED: "The market is closed.",
   CONCURRENT_SL_EXCEEDED: "Your open stop losses would exceed your limit.",
@@ -69,9 +69,19 @@ async function order(path, body) {
   }
 }
 
+// Why a position closed, when the trader did not close it themselves (`trigger_reason`).
+const WHY = {
+  SL_HIT: "Stop loss",
+  TP_HIT: "Take profit",
+  BREACH: "Account rule",
+  ACCOUNT_ENDED: "Account ended",
+  DESK: "Closed by the desk",
+  MANUAL: "",
+};
+
 // Signed out (expired, or signed in elsewhere): back to the sign-in.
 function signedOut() {
-  if (socket) socket.close(1000);
+  if (feed) { feed.close(); feed = null; }
   $("cockpit").hidden = true;
   $("signin").hidden = false;
 }
@@ -138,6 +148,11 @@ async function draw() {
     [p.symbol, p.side, p.net_lots, p.entry_price, p.stop_loss_price, p.take_profit_price].forEach((v) => cell(row, v));
     // Absent for an index or energy: no current valuation is published for those.
     cell(row, p.net_unrealized_pnl ?? "n/a");
+    button(row, "Reduce", () => {
+      const quantity = prompt(`Lots to take off ${p.symbol}`, "");
+      if (!quantity) return Promise.resolve();
+      return order(`/api/positions/${encodeURIComponent(p.position_id)}/reduce`, { symbol: p.symbol, quantity });
+    });
     button(row, "Close", () => order(`/api/positions/${encodeURIComponent(p.position_id)}/close`));
   }
   const pend = $("pending").tBodies[0];
@@ -151,105 +166,93 @@ async function draw() {
 
 function showExecution(e) {
   const row = $("executions").tBodies[0].insertRow(0);
-  [new Date(e.created_at).toLocaleTimeString(), e.intent_kind, e.symbol, e.side, e.status, e.filled_qty, e.avg_price, e.reject_reason].forEach((v) => cell(row, v));
+  [new Date(e.created_at).toLocaleTimeString(), e.intent_kind, e.symbol, e.side, e.status, e.filled_qty, e.avg_price,
+    WHY[e.trigger_reason] ?? e.trigger_reason ?? "", SAY[e.reject_reason] ?? e.reject_reason].forEach((v) => cell(row, v));
 }
 
-// Live prices for the ONE symbol on screen. Each signed-in trader is one connection on
-// your data plan (each open tab too), and a symbol followed live most of its open hours is
-// billed as a continuous feed: subscribe to what is displayed, nothing more.
+// The ONE symbol on screen, live from your server (it relays one price socket to every
+// page: one connection on your data plan, whatever the number of pages). A symbol
+// followed live most of its open hours is billed as a continuous feed: the page asks for
+// the symbol it shows, nothing more.
 let watching = 0; // the latest request: an older one that finishes late gives up
-let backoff = 1000;
-let liveFor = 0; // the request whose live price is on screen: a last known one never covers it
+let live = false; // a live price for the symbol on screen
 let shown = null; // the symbol whose price is on screen
 
-// Never an empty screen: until the stream's first tick (a page just opened, a symbol just
+// Never an empty screen: until the first live price (a page just opened, a symbol just
 // chosen, the stream reconnecting), the last known price, from the executable price your
 // server reads (a market BUY fills at the ask, a SELL at the bid), with the time the API
-// gives for it (`as_of`: the price is at least that old), marked as such. On a closed market it is that market's last price, said
-// closed (`market_open: false`): an order now would be refused. The next tick replaces it. Two reads of a quota of thirty a
+// gives for it (`as_of`: the price is at least that old), marked as such. On a closed
+// market it is that market's last price, said closed (`market_open: false`): an order now
+// would be refused. The next live price replaces it. Two reads of a quota of thirty a
 // minute per trader: one symbol change, or one reconnection, costs two.
 async function lastKnown(symbol, generation) {
   try {
     const [sell, buy] = await Promise.all(["SELL", "BUY"].map((side) =>
       call("GET", `/api/price?symbol=${encodeURIComponent(symbol)}&side=${side}&intent=open`)));
-    if (generation !== watching || liveFor === generation) return;
+    if (generation !== watching || live) return;
     $("bid").textContent = sell.price;
     $("ask").textContent = buy.price;
     const at = new Date(buy.as_of).toLocaleString();
     $("quote-at").textContent = buy.market_open === false ? `market closed, last known as of ${at}` : `last known as of ${at}`;
   } catch {
     // The quota, a server restarting: what is on screen stays, and says it is not live.
-    if (generation === watching && liveFor !== generation) $("quote-at").textContent = "no live price";
+    if (generation === watching && !live) $("quote-at").textContent = "no live price";
   }
 }
 
 function stale(symbol, generation) {
-  if (liveFor === generation) liveFor = 0;
+  live = false;
+  if (!symbol) return;
   $("quote-at").textContent = "no live price";
   void lastKnown(symbol, generation);
 }
 
-async function watch(symbol) {
+// One stream per page: this trader's executions, and the price of `symbol`. A new symbol
+// opens a new stream; the browser reconnects a dropped one by itself.
+function watch(symbol) {
   const generation = ++watching;
-  if (socket) { socket.onclose = null; socket.close(1000); socket = null; }
+  if (feed) feed.close();
   // A new symbol clears the old one's price. A reconnection keeps it on screen, said not
-  // live, while our side comes back: never an empty screen.
+  // live, while it comes back: never an empty screen.
   if (symbol !== shown) { $("bid").textContent = $("ask").textContent = "-"; shown = symbol; }
   stale(symbol, generation);
-  let ticket;
-  try {
-    const { token } = await call("GET", "/api/data-token");
-    const response = await fetch(`${dataApi}/v1/ws-ticket`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
-    if (!response.ok) throw new Error(`ticket ${response.status}`);
-    ({ ticket } = await response.json());
-  } catch {
-    if (generation === watching) setTimeout(() => generation === watching && watch(symbol), backoff = Math.min(backoff * 2, 30_000));
-    return;
-  }
-  if (generation !== watching) return; // the trader moved on meanwhile
-  socket = new WebSocket(`${dataApi.replace(/^http/, "ws")}/v1/stream`, ["adona.data.v1", `ticket.${ticket}`]);
-  // Dropped: say so (never a frozen price that looks live), then come back. A close
-  // with a reason (1008) is an answer, such as an access cut: no loop on it.
-  socket.onclose = (event) => {
+  feed = new EventSource(symbol ? `/api/stream?symbol=${encodeURIComponent(symbol)}` : "/api/stream");
+  feed.addEventListener("quote", (event) => {
+    const quote = JSON.parse(event.data);
+    if (generation !== watching || quote.symbol !== symbol) return;
+    live = true;
+    $("bid").textContent = quote.bid;
+    $("ask").textContent = quote.ask;
+    $("quote-at").textContent = new Date(quote.as_of).toLocaleTimeString();
+  });
+  feed.addEventListener("quote-stale", () => { if (generation === watching) stale(symbol, generation); });
+  feed.addEventListener("execution", (event) => {
+    showExecution(JSON.parse(event.data));
+    refresh();
+  });
+  feed.onerror = () => {
+    if (generation !== watching) return;
     stale(symbol, generation);
-    if (event.code !== 1008 && generation === watching) setTimeout(() => generation === watching && watch(symbol), backoff = Math.min(backoff * 2, 30_000));
-  };
-  socket.onopen = () => socket.send(JSON.stringify({ type: "subscribe", request_id: "q", payload: { channels: [`quote:${symbol}`] } }));
-  socket.onmessage = (event) => {
-    const { type, payload } = JSON.parse(event.data);
-    if ((type === "quote.snapshot" || type === "quote.update") && payload.symbol === symbol) {
-      backoff = 1000;
-      liveFor = generation;
-      $("bid").textContent = payload.bid;
-      $("ask").textContent = payload.ask;
-      $("quote-at").textContent = new Date(payload.as_of).toLocaleTimeString();
-    }
+    // Closed for good (signed out, the server gone): check the session, which signs out.
+    if (feed.readyState === EventSource.CLOSED) call("GET", "/api/session").catch(() => {});
   };
 }
 
 async function start() {
   const session = await call("GET", "/api/session");
-  ({ csrf, data_api: dataApi } = session);
+  ({ csrf, live_prices: livePrices } = session);
   $("who").textContent = session.user;
   $("signin").hidden = true;
   $("cockpit").hidden = false;
   const { symbols } = await call("GET", "/api/symbols");
   $("symbol").replaceChildren(...symbols.map((s) => new Option(s, s)));
   $("symbol").onchange = () => watch($("symbol").value);
-  if (symbols.length) watch(symbols[0]);
+  watch(symbols[0] ?? null); // the executions come on this stream too, symbol or not
 
+  // History first; then your server relays THIS trader's executions as they come (watch).
   const { executions } = await call("GET", "/api/executions");
   executions.slice().reverse().forEach(showExecution);
-  // Your server relays THIS trader's executions as they come, and nobody else's.
-  const executionsFeed = new EventSource("/api/stream");
-  executionsFeed.addEventListener("execution", (event) => {
-    showExecution(JSON.parse(event.data));
-    refresh();
-  });
-  // Closed for good (signed out, the server gone): check the session, which signs out.
-  executionsFeed.onerror = () => {
-    if (executionsFeed.readyState === EventSource.CLOSED) call("GET", "/api/session").catch(() => {});
-  };
+  if (!livePrices) $("quote-at").textContent = "last known prices: your server brings no live prices";
   await refresh();
 }
 

@@ -5,13 +5,17 @@
 // What the browser gets from it, and nothing more:
 //   POST /api/login                  the DEMO sign-in (replace it with yours: see demo-login.mjs)
 //   GET  /api/session                who is signed in, and the CSRF token for the writes
-//   GET  /api/data-token             a twelve-hour data token for THIS trader (live prices)
 //   GET  /api/symbols | /api/positions | /api/pending-orders | /api/executions
 //   GET  /api/price?symbol&side&intent   the executable price, indicative
 //   POST /api/orders                 open an order (SL and TP required: Adona refuses without)
+//   POST /api/positions/:id/reduce   take lots off a position
 //   POST /api/positions/:id/close    close a position
 //   POST /api/orders/:id/cancel      cancel a resting order
-//   GET  /api/stream                 Server-Sent Events: THIS trader's executions as they come
+//   GET  /api/stream?symbol=EURUSD   Server-Sent Events: THIS trader's executions as they
+//                                    come, and the live price of the symbol on screen
+//
+// No key and no token ever reach the browser, a data token included: this server holds
+// ONE socket for every trader's confirmations and ONE for live prices (feeds.mjs).
 //
 // Every /api route acts for the trader of the session, never for an id the browser sends.
 
@@ -22,6 +26,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Adona, AdonaError } from "./adona.mjs";
+import { ExecutionsFeed, Pages, PriceFeed } from "./feeds.mjs";
 import { demoUsers, assertLocalOnly, isLocalRequest } from "./demo-login.mjs";
 
 const PUBLIC = join(fileURLToPath(new URL(".", import.meta.url)), "public");
@@ -31,6 +36,11 @@ const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", "
 const SAFE = { "Content-Security-Policy": "frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" };
 // The key the page sends for one order: a UUID, prefixed here by the session's trader.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A position's or an order's id, as Adona gives it: opaque, `pos_` or `ord_` and up to 220
+// characters. Passed back as it is, never read.
+const POSITION_ID = "pos_[A-Za-z0-9_-]{22,216}";
+const ORDER_ID = "ord_[A-Za-z0-9_-]{22,216}";
+const SYMBOL = /^[A-Z0-9._-]{1,32}$/;
 
 class BadRequest extends Error {}
 
@@ -103,13 +113,14 @@ function sameOrigin(req, publicOrigin) {
 
 const SESSION_MS = 8 * 3600 * 1000;
 
-export function createApp({ adona, users, pollMs = 2000, localOnly = true, publicOrigin }) {
-  // sid -> { user, traderId, csrf, until }. In memory, eight hours, for the example; yours
-  // lives where your sessions live, with `Secure` cookies once served over HTTPS.
+export function createApp({ adona, users, localOnly = true, publicOrigin }) {
+  // sid -> { user, traderId, csrf, until, symbols }. In memory, eight hours, for the
+  // example; yours lives where your sessions live, with `Secure` cookies over HTTPS.
   const sessions = new Map();
-  // traderId -> { clients: Set<res>, seen: Set<event_id>, timer }. One poll per CONNECTED
-  // trader, relayed to that trader's own pages and nobody else's.
-  const feeds = new Map();
+  const pages = new Pages();
+  const executionsFeed = new ExecutionsFeed({ adona, pages });
+  const priceFeed = new PriceFeed({ adona, pages });
+  let started = false;
 
   function sessionOf(req) {
     const sid = cookie(req, "sid");
@@ -128,59 +139,36 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
     return same(req.headers["x-csrf-token"], session.csrf);
   }
 
-  // Your trader's executions, polled by cursor and relayed to THEIR open pages.
-  // Polled: one read per connected trader every `pollMs`.
-  async function poll(traderId) {
-    const feed = feeds.get(traderId);
-    if (!feed) return;
-    try {
-      // Newest first: read pages back to the last one already relayed (at most a few).
-      const fresh = [];
-      let cursor;
-      for (let page = 0; page < 5; page += 1) {
-        const { executions, next_cursor } = await adona.executions(traderId, { limit: 50, cursor });
-        const unseen = executions.filter((e) => !feed.seen.has(e.event_id));
-        fresh.push(...unseen);
-        if (!feed.primed || unseen.length < executions.length || !next_cursor) break;
-        cursor = next_cursor;
-      }
-      for (const execution of fresh.reverse()) { // oldest first
-        remember(feed, execution.event_id);
-        if (!feed.primed) continue; // the first read is history, not news
-        for (const client of feed.clients) client.write(`event: execution\ndata: ${JSON.stringify(execution)}\n\n`);
-      }
-      feed.primed = true;
-    } catch (error) {
-      console.error(`executions of ${traderId}:`, error.code ?? error.message);
-    }
+  // The trader's own symbols, read once per session: a page may watch those and no other,
+  // so nobody makes this server follow a symbol for nothing.
+  async function symbolsOf(session) {
+    session.symbols ??= new Set((await adona.tradableSymbols(session.traderId)).symbols);
+    return session.symbols;
   }
 
-  // What a feed has relayed, the last 500 ids: enough to recognise a page, and bounded.
-  function remember(feed, id) {
-    feed.seen.add(id);
-    if (feed.seen.size > 500) feed.seen.delete(feed.seen.values().next().value);
-  }
-
-  function follow(traderId, res) {
-    let feed = feeds.get(traderId);
-    if (!feed) {
-      feed = { clients: new Set(), seen: new Set(), primed: false, timer: null };
-      feeds.set(traderId, feed);
-      // One read at a time: the next is scheduled once this one is done, so a slow answer
-      // never piles reads up.
-      const tick = async () => {
-        await poll(traderId);
-        if (feeds.get(traderId) === feed) feed.timer = setTimeout(tick, pollMs);
-      };
-      tick();
+  // One page's stream: this trader's confirmations, and the live price of ITS symbol.
+  async function follow(req, res, session, symbol) {
+    if (symbol && !(SYMBOL.test(symbol) && (await symbolsOf(session)).has(symbol))) {
+      return send(res, 400, { detail: "BAD_REQUEST" });
     }
-    feed.clients.add(res);
-    res.on("close", () => {
-      feed.clients.delete(res);
-      if (feed.clients.size === 0) {
-        clearTimeout(feed.timer);
-        feeds.delete(traderId);
-      }
+    if (!started) {
+      started = true;
+      executionsFeed.start();
+      priceFeed.start();
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", ...SAFE });
+    res.write(": connected\n\n");
+    const page = {
+      traderId: session.traderId,
+      symbol: priceFeed.enabled ? symbol : null,
+      send: (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+    };
+    pages.add(page);
+    priceFeed.sync();
+    if (!priceFeed.live) page.send("quote-stale", {});
+    req.on("close", () => {
+      pages.delete(page);
+      priceFeed.sync();
     });
   }
 
@@ -213,9 +201,7 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
 
     if (req.method === "GET") {
       switch (path) {
-        // The data API's address too: the page opens the live prices there itself.
-        case "/api/session": return send(res, 200, { user: session.user, csrf: session.csrf, data_api: adona.api });
-        case "/api/data-token": return send(res, 200, { token: await adona.dataToken(trader) });
+        case "/api/session": return send(res, 200, { user: session.user, csrf: session.csrf, live_prices: priceFeed.enabled });
         case "/api/symbols": return send(res, 200, await adona.tradableSymbols(trader));
         case "/api/positions": return send(res, 200, await adona.positions(trader));
         case "/api/pending-orders": return send(res, 200, await adona.pendingOrders(trader));
@@ -224,10 +210,7 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
           const q = url.searchParams;
           return send(res, 200, await adona.executablePrice(trader, { symbol: q.get("symbol"), side: q.get("side"), intent: q.get("intent") }));
         }
-        case "/api/stream":
-          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
-          res.write(": connected\n\n");
-          return follow(trader, res);
+        case "/api/stream": return follow(req, res, session, url.searchParams.get("symbol"));
       }
     }
 
@@ -248,9 +231,14 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
         // The page's key for THIS order: the same on every resend, from the page or from here.
         return send(res, 200, await adona.openOrder(trader, order, orderKey(req, trader)));
       }
-      let match = path.match(/^\/api\/positions\/([A-Za-z0-9:._-]{1,128})\/close$/);
+      let match = path.match(new RegExp(`^/api/positions/(${POSITION_ID})/close$`));
       if (match) return send(res, 200, await adona.closePosition(trader, match[1], orderKey(req, trader)));
-      match = path.match(/^\/api\/orders\/([A-Za-z0-9:._-]{1,128})\/cancel$/);
+      match = path.match(new RegExp(`^/api/positions/(${POSITION_ID})/reduce$`));
+      if (match) {
+        const { symbol, quantity } = await body(req);
+        return send(res, 200, await adona.reducePosition(trader, match[1], { symbol, quantity }, orderKey(req, trader)));
+      }
+      match = path.match(new RegExp(`^/api/orders/(${ORDER_ID})/cancel$`));
       if (match) return send(res, 200, await adona.cancelOrder(trader, match[1], orderKey(req, trader)));
     }
     return send(res, 404, { detail: "Not Found" });
@@ -268,7 +256,7 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
     }
   }
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (localOnly && !isLocalRequest(req)) return send(res, 403, { detail: "DEMO_SIGN_IN_IS_LOCAL_ONLY" });
     try {
@@ -279,6 +267,8 @@ export function createApp({ adona, users, pollMs = 2000, localOnly = true, publi
       else res.end();
     }
   });
+  server.on("close", () => { executionsFeed.stop(); priceFeed.stop(); });
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -288,7 +278,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const adona = new Adona({
     api: process.env.ADONA_API ?? "https://api.adona-robot.com",
     tenantKey: process.env.ADONA_TENANT_KEY,
-    dataKey: process.env.ADONA_DATA_KEY,
+    dataKey: process.env.ADONA_DATA_KEY || undefined,
   });
   createApp({ adona, users: demoUsers(process.env.DEMO_USERS), publicOrigin: process.env.PUBLIC_ORIGIN || undefined }).listen(port, host, () => {
     console.log(`prop cockpit on http://${host}:${port} (DEMO sign-in: local only)`);

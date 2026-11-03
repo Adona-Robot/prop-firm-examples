@@ -1,8 +1,10 @@
 // The calls your server makes to Adona Robot. Server side only: both keys live here.
 //
-// - `/v1/prop` with your TENANT key (adp_...): your traders, their orders, their trading.
-// - `/v1` with your DATA key (adk_...): a twelve-hour token per trader, which the browser
-//   uses for live prices.
+// - `/v1/prop` with your TENANT key (adp_...): your traders, their orders, their trading,
+//   and `WS /v1/prop/stream`, their confirmations pushed to this server.
+// - `/v1` with your DATA key (adk_...), optional: ONE live price socket for this server,
+//   which relays the prices to your pages. The browser never holds a data token. Without
+//   a data key, bring your own prices: the page then shows the last known executable price.
 //
 // Every refusal answers {"detail": "CODE"}. `AdonaError` carries the status, the code and
 // `Retry-After` when there is one: branch on the code, never on the text.
@@ -21,15 +23,16 @@ export class AdonaError extends Error {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class Adona {
-  constructor({ api, tenantKey, dataKey, fetchImpl = fetch, timeoutMs = 10_000 }) {
-    if (!tenantKey || !dataKey) throw new Error("set ADONA_TENANT_KEY and ADONA_DATA_KEY in the environment");
+  constructor({ api, tenantKey, dataKey, fetchImpl = fetch, webSocketImpl = globalThis.WebSocket, timeoutMs = 10_000 }) {
+    if (!tenantKey) throw new Error("set ADONA_TENANT_KEY in the environment");
     this.api = api.replace(/\/$/, "");
     this.tenantKey = tenantKey;
-    this.dataKey = dataKey;
+    this.dataKey = dataKey || null; // optional: your own price source instead
     this.fetch = fetchImpl;
+    this.WebSocket = webSocketImpl;
     this.timeoutMs = timeoutMs;
     this.prop = null; // { token, until }
-    this.dataTokens = new Map(); // end_user_id -> { token, until }
+    this.data = null; // { token, until }
   }
 
   async #call(method, path, { bearer, body, headers = {} } = {}) {
@@ -73,15 +76,27 @@ export class Adona {
     }
   }
 
-  // A data token for ONE trader (`end_user_id`): each connected trader is one person on
-  // your data plan, and one socket at the month's peak.
-  async dataToken(endUserId) {
-    const held = this.dataTokens.get(endUserId);
-    if (held && Date.now() < held.until) return held.token;
-    const json = await this.#call("POST", "/v1/tokens", { bearer: this.dataKey, body: { end_user_id: endUserId } });
-    const token = { token: json.access_token, until: Date.now() + (json.expires_in - 60) * 1000 };
-    this.dataTokens.set(endUserId, token);
-    return token.token;
+  // `WS /v1/prop/stream`: every trader's confirmations, pushed to this server. The prop
+  // token goes in `Authorization`, which a server can send and a browser cannot; Node's
+  // WebSocket sends no `Origin`, which the stream would refuse. `after` resumes after the
+  // last frame received (24 hours at most).
+  async propStream({ after } = {}) {
+    const url = new URL(`${this.api.replace(/^http/, "ws")}/v1/prop/stream`);
+    if (after) url.searchParams.set("after", after);
+    return new this.WebSocket(url, { headers: { Authorization: `Bearer ${await this.#propToken()}` } });
+  }
+
+  // ONE live price socket for this server (`WS /v1/stream`), on a data token of its own:
+  // one connection on your data plan, whatever the number of pages open. A ticket, then
+  // the socket, as for any data client.
+  async priceStream() {
+    if (!this.dataKey) throw new Error("no ADONA_DATA_KEY: bring your own prices");
+    if (!this.data || Date.now() > this.data.until) {
+      const json = await this.#call("POST", "/v1/tokens", { bearer: this.dataKey, body: { end_user_id: "cockpit-server" } });
+      this.data = { token: json.access_token, until: Date.now() + (json.expires_in - 60) * 1000 };
+    }
+    const { ticket } = await this.#call("POST", "/v1/ws-ticket", { bearer: this.data.token });
+    return new this.WebSocket(`${this.api.replace(/^http/, "ws")}/v1/stream`, ["adona.data.v1", `ticket.${ticket}`]);
   }
 
   // Your trader, by YOUR name of them (`external_ref`, set when you invited them).
@@ -110,6 +125,9 @@ export class Adona {
   // place, the SAME one when you send that order again. See `placeOnce`.
   openOrder(traderId, order, key) {
     return this.placeOnce("POST", `/v1/prop/traders/${traderId}/orders`, order, key);
+  }
+  reducePosition(traderId, positionId, { symbol, quantity }, key) {
+    return this.placeOnce("POST", `/v1/prop/traders/${traderId}/positions/${encodeURIComponent(positionId)}/reduce`, { symbol, quantity }, key);
   }
   closePosition(traderId, positionId, key) {
     return this.placeOnce("POST", `/v1/prop/traders/${traderId}/positions/${encodeURIComponent(positionId)}/close`, undefined, key);
