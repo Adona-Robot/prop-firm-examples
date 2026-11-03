@@ -7,6 +7,7 @@
   "engines": { "node": ">=22.4" },
   "scripts": {
     "start": "node --env-file=.env server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "check": "node --env-file=.env check/live.mjs"
   }
 }

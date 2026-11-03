@@ -17,7 +17,15 @@ our prices, `/v1` (live prices). Node 22.4 or later, no dependency.
 cp .env.example .env     # then fill in your keys and DEMO_USERS
 npm start                # http://127.0.0.1:8080
 npm test                 # against a fake Adona Robot: no key, no network
+npm run check            # against a REAL Adona Robot: the "ready to trade" checklist
 ```
+
+`npm run check` (`check/live.mjs`) goes through the checklist as a page would: two traders
+signed in, a live price relayed, an opening without a stop loss refused, an opening sent
+twice with its key placed once, its confirmation pushed to its trader only, the position
+closed by its id. It opens and closes one small position: run it on demo accounts
+(`CHECK_TRADERS=<ref A>,<ref B>`). Adona Robot's own CI runs it on every change of
+`/v1/prop`.
 
 1. **Your tenant key** (`adp_...`) for `/v1/prop`, and, for our live prices, **your data key**
    (`adk_...`). Both stay in `.env`, on your server. Neither, nor any token, ever reaches a
