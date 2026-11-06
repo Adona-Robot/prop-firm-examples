@@ -1,0 +1,3 @@
+# Your two keys live here: never commit it.
+.env
+node_modules/
