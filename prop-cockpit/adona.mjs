@@ -63,13 +63,17 @@ export class Adona {
     return this.prop.token;
   }
 
+  // The prop token was refused as expired (a call's 401, the stream's 1008): the next
+  // call takes a new one.
+  forgetPropToken() { this.prop = null; }
+
   // `/v1/prop`, once more with a fresh token if this one was refused as expired.
   async propCall(method, path, options = {}) {
     try {
       return await this.#call(method, path, { ...options, bearer: await this.#propToken() });
     } catch (error) {
       if (error instanceof AdonaError && error.status === 401 && error.code === "INVALID_JWT") {
-        this.prop = null;
+        this.forgetPropToken();
         return this.#call(method, path, { ...options, bearer: await this.#propToken() });
       }
       throw error;
@@ -99,7 +103,7 @@ export class Adona {
     return new this.WebSocket(`${this.api.replace(/^http/, "ws")}/v1/stream`, ["adona.data.v1", `ticket.${ticket}`]);
   }
 
-  // Your trader, by YOUR name of them (`external_ref`, set when you invited them).
+  // Your trader, by YOUR name of them (`external_ref`, set when you created them).
   async traderByRef(externalRef) {
     const { traders } = await this.propCall("GET", `/v1/prop/traders?external_ref=${encodeURIComponent(externalRef)}`);
     return traders[0] ?? null;

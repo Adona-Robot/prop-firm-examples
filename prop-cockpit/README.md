@@ -24,15 +24,15 @@ npm run check            # against a REAL Adona Robot: the "ready to trade" chec
 signed in, a live price relayed, an opening without a stop loss refused, an opening sent
 twice with its key placed once, its confirmation pushed to its trader only, the position
 closed by its id. It opens and closes one small position: run it on demo accounts
-(`CHECK_TRADERS=<ref A>,<ref B>`). Adona Robot's own CI runs it on every change of
-`/v1/prop`.
+(`CHECK_TRADERS=<ref A>,<ref B>`).
 
 1. **Your tenant key** (`adp_...`) for `/v1/prop`, and, for our live prices, **your data key**
    (`adk_...`). Both stay in `.env`, on your server. Neither, nor any token, ever reaches a
    browser. Without a data key, bring your own prices: the page shows the last known
    executable price.
-2. **Your traders**, invited through `POST /v1/prop/traders` with your own name for each
-   (`external_ref`). `DEMO_USERS` maps a demo user name to that name.
+2. **Your traders**, created through `POST /v1/prop/traders` with your own name for each
+   (`external_ref`). The trader exists at once: the answer (201) carries its `trader_id`,
+   with no invitation and no email. `DEMO_USERS` maps a demo user name to that name.
    Each trades on an account you open for them on one of your products
    (`POST /v1/prop/traders/{id}/accounts`); until then the page answers `NO_TRADING_ACCOUNT`.
 
@@ -101,8 +101,9 @@ two traders in and checks that each receives their own executions only.
   with `after=<cursor>` (24 hours, 1000 reports at most). Past that (`CURSOR_TOO_OLD`), the page
   reads `GET /v1/prop/traders/{id}/executions` on load, as it does anyway.
 - **A close with 1008 is an answer** (a key revoked, a tenant suspended): never retried in a
-  loop. 1013 is "later" (three sockets per tenant, thirty connections a minute); 1011 is ours,
-  resume with your cursor.
+  loop. Except `INVALID_JWT`: the prop token ran out (twelve hours) on an open stream; your
+  server takes a new one and resumes with its cursor. 1013 is "later" (three sockets per
+  tenant, thirty connections a minute); 1011 is ours, resume with your cursor.
 - **Why a position closed** is in `trigger_reason` on a close the trader did not ask for:
   `SL_HIT`, `TP_HIT`, `BREACH`, `ACCOUNT_ENDED`, `DESK`; `MANUAL` for their own. The page shows
   it.

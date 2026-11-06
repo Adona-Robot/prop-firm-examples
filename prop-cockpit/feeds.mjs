@@ -8,7 +8,8 @@
 //
 // Both come back on their own after a drop, and both say on the page when they are not
 // live. A close with a code that is an answer (1008: a key revoked, a tenant suspended)
-// is never retried in a loop: it is logged for you to fix.
+// is never retried in a loop: it is logged for you to fix. One 1008 is not: INVALID_JWT
+// on the confirmations stream is its twelve-hour token running out.
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ANSWER = 1008; // a refusal: retrying changes nothing
@@ -68,6 +69,10 @@ export class ExecutionsFeed {
         // CURSOR_TOO_OLD: the 24 hours passed; the pages read GET .../executions on load.
         if (event.reason === "CURSOR_TOO_OLD" || event.reason === "INVALID_CURSOR") {
           this.cursor = null;
+        } else if (event.reason === "INVALID_JWT") {
+          // Adona re-checks the token of an open stream: twelve hours on, it closes it.
+          // A new token, and the stream resumes after its cursor.
+          this.adona.forgetPropToken();
         } else {
           console.error(`executions stream refused: ${event.reason}. Fix it, then restart.`);
           return;

@@ -34,7 +34,10 @@ function fakeAdona() {
     const url = new URL(req.url, "http://fake");
     const json = (status, body) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
     state.calls.push(`${req.method} ${url.pathname}`);
-    if (url.pathname === "/v1/prop/tokens") return json(200, { access_token: "prop-token", expires_in: 43200 });
+    if (url.pathname === "/v1/prop/tokens") {
+      state.propTokens = (state.propTokens ?? 0) + 1; // the first is "prop-token", then "prop-token-2"...
+      return json(200, { access_token: state.propTokens === 1 ? "prop-token" : `prop-token-${state.propTokens}`, expires_in: 43200 });
+    }
     if (url.pathname === "/v1/tokens") return json(200, { access_token: `data-${JSON.parse(raw).end_user_id}`, expires_in: 43200 });
     if (url.pathname === "/v1/ws-ticket") return json(200, { ticket: `ticket-${state.tickets = (state.tickets ?? 0) + 1}` });
     if (url.pathname === "/v1/prop/traders") {
@@ -233,6 +236,29 @@ test("a stream closed with a refusal is not opened again in a loop", async (t) =
   await settle(1300);
   stop.abort();
   assert.equal(fake.sockets.opened.length, before, "an answer, not a hiccup");
+});
+
+test("a stream closed because its prop token expired comes back on a new token, after its cursor", async (t) => {
+  // Adona re-checks the token of an open stream and closes it with 1008 INVALID_JWT
+  // when the twelve hours are up: that close is not a refusal to fix by hand.
+  const { fake, base } = await world(t);
+  const alice = await signIn(base, "alice");
+  const stop = new AbortController();
+  const received = [];
+  listenStream(base, alice.cookie, received, stop.signal);
+  await settle(100);
+  fake.sockets.prop().push(frame("t-alice", "a-1", "c-1"));
+  const before = fake.sockets.opened.length;
+  fake.sockets.prop().drop(1008, "INVALID_JWT");
+  await settle(1300); // the first pause before coming back
+  assert.equal(fake.sockets.opened.length, before + 1, "the stream is opened again");
+  const again = fake.sockets.prop();
+  assert.equal(new URL(again.url).searchParams.get("after"), "c-1");
+  assert.equal(again.options.headers.Authorization, "Bearer prop-token-2", "on a new prop token");
+  again.push(frame("t-alice", "a-2", "c-2"));
+  await settle(100);
+  stop.abort();
+  assert.deepEqual(executions(received), ["a-1", "a-2"]);
 });
 
 test("an order whose answer is lost is sent again with the same key, and placed once", async (t) => {

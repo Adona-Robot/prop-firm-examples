@@ -1,6 +1,5 @@
 // The cockpit against a REAL Adona Robot: the "ready to trade" checklist, through this
-// server, as a trader's page would go through it. Adona's own CI runs it on every change
-// of /v1/prop, against a throwaway stack; you can run it against yours.
+// server, as a trader's page would go through it. Run it against your own Adona Robot.
 //
 //   ADONA_API=... ADONA_TENANT_KEY=... ADONA_DATA_KEY=... \
 //   CHECK_TRADERS=<external_ref of trader A>,<external_ref of trader B> node check/live.mjs

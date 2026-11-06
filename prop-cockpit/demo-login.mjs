@@ -5,7 +5,7 @@
 // address other than this machine's own.
 //
 // What to keep when you replace it: your user is matched to YOUR trader by your own name
-// of them, the `external_ref` you set when you invited them on `/v1/prop/traders`. The
+// of them, the `external_ref` you set when you created them on `/v1/prop/traders`. The
 // server then acts for that trader only, whatever the browser sends.
 
 const LOCAL = new Set(["127.0.0.1", "::1", "localhost"]);
