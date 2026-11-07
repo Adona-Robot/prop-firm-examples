@@ -128,9 +128,10 @@ export async function checklist({ adona, refA, refB, product, symbol = "EURUSD",
     await until("the opening's confirmation, pushed", () => toA.find((e) => e.event === "execution" && e.status === "FILLED"));
     ok("its confirmation came by the stream, to trader A");
 
-    const positions = await positionsOf(a);
-    const position = positions.find((p) => p.symbol === symbol);
-    assert.ok(position && /^pos_/.test(position.position_id), `an opaque position id: ${position?.position_id}`);
+    // Adona lists the position a moment after its confirmation is pushed: read until it does.
+    const position = await until("the opening's position, listed", async () =>
+      (await positionsOf(a)).find((p) => p.symbol === symbol));
+    assert.ok(/^pos_/.test(position.position_id), `an opaque position id: ${position.position_id}`);
     const before = toA.filter((e) => e.event === "execution").length;
     const closed = await post(a, `/api/positions/${encodeURIComponent(position.position_id)}/close`);
     assert.equal(closed.status, 200, `the close: ${closed.status}`);
@@ -138,6 +139,8 @@ export async function checklist({ adona, refA, refB, product, symbol = "EURUSD",
       toA.filter((e) => e.event === "execution").slice(before).find((e) => e.status === "FILLED"));
     assert.equal(close.trigger_reason, "MANUAL", "a close the trader asked for");
     ok("the position closed by its opaque id, said MANUAL");
+    await until("the closed position, no longer listed", async () => !(await positionsOf(a)).some((p) => p.symbol === symbol));
+    ok("the closed position is no longer listed");
 
     assert.equal(toB.filter((e) => e.event === "execution").length, 0, "trader B saw none of A's");
     ok("trader B received none of trader A's executions");
