@@ -172,7 +172,7 @@ meets most:
 Closing, reducing and cancelling are never held back by the opening quotas. A position or an
 order is named by an opaque id (`pos_...`, `ord_...`, up to 220 characters): pass it back as
 it is, never read it. The full list,
-route by route, is in the [API reference](https://adona-robot.com/en/reference).
+route by route, is in the [API reference](https://adona-robot.com/en/reference#prop).
 
 ## What it does not do
 
