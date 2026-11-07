@@ -504,3 +504,18 @@ test("the checklist waits for Adona to list the opening's position, then to drop
   assert.equal(said.at(-1), "all checks passed");
   assert.deepEqual(fake.state.orders.map((o) => o.kind ?? "open"), ["open", "close"]);
 });
+
+test("after an execution the page reads its lists again, until Adona has had time to list it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { relistAfterExecutions } = await import("../public/relist.js");
+  let reads = 0;
+  const afterExecution = relistAfterExecutions(() => { reads += 1; });
+  afterExecution();
+  assert.equal(reads, 1, "at once");
+  t.mock.timers.tick(1000);
+  assert.equal(reads, 2, "a second later");
+  afterExecution(); // a new execution starts the reads over: none is lost, none doubled
+  assert.equal(reads, 3);
+  t.mock.timers.tick(10_000);
+  assert.equal(reads, 6, "then after 1, 3 and 10 seconds");
+});
