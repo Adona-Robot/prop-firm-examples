@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { Adona } from "../adona.mjs";
 import { createApp } from "../server.mjs";
 import { assertLocalOnly } from "../demo-login.mjs";
+import { checklist } from "../check/checklist.mjs";
 
 // --- a fake Adona ------------------------------------------------------------------------
 
@@ -22,6 +23,11 @@ function fakeAdona() {
   const state = {
     traders: { "ref-alice": "t-alice", "ref-bob": "t-bob" },
     executions: { "t-alice": [], "t-bob": [] },
+    // The open positions, and what a read lists: Adona lists a position a moment after its
+    // confirmation is pushed, and keeps listing a closed one a moment too. Here: one read late.
+    positions: { "t-alice": [], "t-bob": [] },
+    listed: {},
+    onPlaced: null, // what the test does once an order or a close is placed
     orders: [], // what was PLACED, once per key
     byKey: new Map(),
     dropFirstAnswer: false, // the first order's answer is lost on the way back
@@ -55,19 +61,30 @@ function fakeAdona() {
         const page = all.slice(from, from + limit);
         return json(200, { executions: page, ...(from + limit < all.length ? { next_cursor: String(from + limit) } : {}) });
       }
-      if (what === "positions") return json(200, { positions: [] });
+      if (what === "positions") {
+        const shown = state.listed[trader] ?? [];
+        state.listed[trader] = [...state.positions[trader]];
+        return json(200, { positions: shown });
+      }
       if (what === "pending-orders") return json(200, { orders: [] });
       return json(200, { symbols: ["EURUSD", "XAUUSD"] });
+    }
+    m = url.pathname.match(/^\/v1\/prop\/traders\/([^/]+)\/executable-price$/);
+    if (m) {
+      const [side, intent] = [url.searchParams.get("side"), url.searchParams.get("intent")];
+      return json(200, { symbol: url.searchParams.get("symbol"), side, intent, price: "1.10000", as_of: new Date().toISOString(), market_open: true });
     }
     m = url.pathname.match(/^\/v1\/prop\/traders\/([^/]+)\/positions\/([^/]+)\/(close|reduce)$/);
     if (m && req.method === "POST") {
       state.orders.push({ trader: m[1], key: req.headers["idempotency-key"], position: m[2], kind: m[3], body: raw ? JSON.parse(raw) : {} });
+      state.onPlaced?.(state.orders.at(-1));
       return json(200, { ingress_status: "PUBLISHED", event_id: `ev-${state.orders.length}` });
     }
     m = url.pathname.match(/^\/v1\/prop\/traders\/([^/]+)\/orders$/);
     if (m && req.method === "POST") {
       const key = req.headers["idempotency-key"];
       if (!key) return json(400, { detail: "IDEMPOTENCY_KEY_REQUIRED" });
+      if (!JSON.parse(raw).stop_loss_price) return json(409, { detail: "STOP_LOSS_REQUIRED" });
       if (state.unknownOutcome) return json(409, { detail: "IDEMPOTENCY_OUTCOME_UNKNOWN" });
       if (state.inProgress) {
         // The first attempt is placed and still running; every retry hears IN_PROGRESS.
@@ -79,6 +96,7 @@ function fakeAdona() {
         const ack = { ingress_status: "PUBLISHED", event_id: `ev-${state.orders.length + 1}` };
         state.orders.push({ trader: m[1], key, body: JSON.parse(raw) });
         state.byKey.set(key, ack);
+        state.onPlaced?.(state.orders.at(-1));
         if (state.dropFirstAnswer) {
           state.dropFirstAnswer = false;
           return req.socket.destroy(); // placed, but the answer never arrives
@@ -462,4 +480,42 @@ test("an order still in progress after every retry is never placed twice", async
   fake.state.inProgress = false;
   await placeFromPage(base, alice, key); // the page sends it again, same key
   assert.equal(fake.state.orders.length, 1);
+});
+
+test("the checklist waits for Adona to list the opening's position, then to drop it after the close", async (t) => {
+  const fake = fakeAdona();
+  const api = await listen(fake.server);
+  fake.sockets = fakeSockets();
+  t.after(() => { fake.server.closeAllConnections(); fake.server.close(); });
+  const adona = new Adona({ api, tenantKey: "tenant-key-for-tests", timeoutMs: 2000, webSocketImpl: fake.sockets.FakeSocket });
+  // Adona confirms on the stream first; the list follows (one read late, in this fake).
+  let fills = 0;
+  fake.state.onPlaced = ({ trader, kind, body }) => setTimeout(() => {
+    fills += 1;
+    if (kind === "close") fake.state.positions[trader] = [];
+    else fake.state.positions[trader] = [{ position_id: "pos_AAAAAAAAAAAAAAAAAAAAAAAA", symbol: body.symbol, side: body.side }];
+    fake.sockets.prop().push({
+      type: "execution", cursor: String(fills), trader_id: trader,
+      execution: { event_id: `ev-fill-${fills}`, status: "FILLED", ...(kind === "close" ? { trigger_reason: "MANUAL" } : {}) },
+    });
+  }, 10);
+  const said = [];
+  await checklist({ adona, refA: "ref-alice", refB: "ref-bob", waitMs: 3000, log: (line) => said.push(line) });
+  assert.equal(said.at(-1), "all checks passed");
+  assert.deepEqual(fake.state.orders.map((o) => o.kind ?? "open"), ["open", "close"]);
+});
+
+test("after an execution the page reads its lists again, until Adona has had time to list it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { relistAfterExecutions } = await import("../public/relist.js");
+  let reads = 0;
+  const afterExecution = relistAfterExecutions(() => { reads += 1; });
+  afterExecution();
+  assert.equal(reads, 1, "at once");
+  t.mock.timers.tick(1000);
+  assert.equal(reads, 2, "a second later");
+  afterExecution(); // a new execution starts the reads over: none is lost, none doubled
+  assert.equal(reads, 3);
+  t.mock.timers.tick(10_000);
+  assert.equal(reads, 6, "then after 1, 3 and 10 seconds");
 });

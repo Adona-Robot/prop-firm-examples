@@ -107,6 +107,10 @@ two traders in and checks that each receives their own executions only.
 - **Why a position closed** is in `trigger_reason` on a close the trader did not ask for:
   `SL_HIT`, `TP_HIT`, `BREACH`, `ACCOUNT_ENDED`, `DESK`; `MANUAL` for their own. The page shows
   it.
+- **The confirmation comes first, the lists follow.** Adona lists a position, or drops a
+  closed one, a moment after it pushes the execution. After each execution the page reads
+  its lists at once, then again 1, 3 and 10 seconds later (`public/relist.js`); the
+  checklist reads them until they show it.
 
 ## Prices: what the page shows, and what an order fills at
 

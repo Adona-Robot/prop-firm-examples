@@ -1,6 +1,8 @@
 // The page. It never holds a key nor a token: it talks to YOUR server (/api/...), which
 // relays this trader's confirmations and the live price on screen (/api/stream).
 
+import { relistAfterExecutions } from "./relist.js";
+
 const $ = (id) => document.getElementById(id);
 let csrf = null;
 let livePrices = false; // your server relays live prices (it holds a data key)
@@ -138,6 +140,7 @@ function button(row, label, action) {
 async function refresh() {
   try { await draw(); } catch { /* signed out, or a passing failure: the next refresh retries */ }
 }
+const afterExecution = relistAfterExecutions(refresh);
 
 async function draw() {
   const [{ positions }, { orders }] = await Promise.all([call("GET", "/api/positions"), call("GET", "/api/pending-orders")]);
@@ -228,7 +231,7 @@ function watch(symbol) {
   feed.addEventListener("quote-stale", () => { if (generation === watching) stale(symbol, generation); });
   feed.addEventListener("execution", (event) => {
     showExecution(JSON.parse(event.data));
-    refresh();
+    afterExecution();
   });
   feed.onerror = () => {
     if (generation !== watching) return;
